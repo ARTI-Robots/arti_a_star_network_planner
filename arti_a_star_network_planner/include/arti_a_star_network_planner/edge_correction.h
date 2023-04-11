@@ -1,0 +1,32 @@
+/*
+Created by clemens on 31.03.20.
+This file is part of the software provided by ARTI
+Copyright (c) 2020, ARTI
+All rights reserved.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#ifndef ARTI_A_STAR_NETWORK_PLANNER_EDGE_CORRECTION_H
+#define ARTI_A_STAR_NETWORK_PLANNER_EDGE_CORRECTION_H
+
+#include <arti_a_star_network_planner/edge.h>
+
+namespace arti_a_star_network_planner
+{
+class EdgeCorrection
+{
+public:
+  EdgeCorrection(size_t max_number_increases, double increase_factor, double validity_period_s);
+
+  void increaseEdgeCosts(Edge& edge, ros::Time current_time);
+  void resetEdgeCostIfExpired(Edge& edge, ros::Time current_time);
+
+private:
+  size_t max_number_increases_;
+  double increase_factor_;
+  ros::Duration validity_period_;
+};
+}
+
+#endif //ARTI_A_STAR_NETWORK_PLANNER_EDGE_CORRECTION_H

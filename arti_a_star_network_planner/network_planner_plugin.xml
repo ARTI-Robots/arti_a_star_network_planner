@@ -1,0 +1,17 @@
+<!--suppress XmlUnboundNsPrefix, XmlUnboundNsPrefix -->
+<library path="lib/libarti_a_star_network_planner">
+  <class name="arti_a_star_network_planner/NetworkPlannerPlugin"
+         type="arti_a_star_network_planner::NetworkPlannerPlugin" base_class_type="arti_nav_core::BaseNetworkPlanner">
+    <description>
+      Network planner using the A* algorithm to find a path in the network.
+    </description>
+  </class>
+
+  <!-- We keep an alias with the old name for backwards compatibility: -->
+  <class name="arti_a_start_network_planner/NetworkPlannerPlugin"
+         type="arti_a_star_network_planner::NetworkPlannerPlugin" base_class_type="arti_nav_core::BaseNetworkPlanner">
+    <description>
+      Network planner using the A* algorithm to find a path in the network.
+    </description>
+  </class>
+</library>

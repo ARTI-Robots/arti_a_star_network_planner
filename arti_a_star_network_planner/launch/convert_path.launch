@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<launch>
+    <arg name="path_name" default="path"/>
+    <arg name="path_filename" default="$(env HOME)/db/pose_graph/$(arg path_name).yaml"/>
+    <arg name="output_graph_file_name" default="$(env HOME)/db/roadmaps/$(arg path_name).yaml"/>
+
+    <node pkg="arti_a_star_network_planner" type="convert_path_node" name="convert_path_node"
+          output="screen" required="true">
+        <param name="frame_id" type="string" value="map"/>
+        <param name="name" type="string" value="nav_network"/>
+        <param name="path_file_name" type="string" value="$(arg path_filename)"/>
+        <param name="output_graph_file_name" type="string" value="$(arg output_graph_file_name)"/>
+
+        <param name="same_vertex_distance" type="double" value="0.1"/>
+        <param name="min_distance" type="double" value="2."/>
+        <param name="max_rotation_difference" type="double" value="0.78"/>
+    </node>
+</launch>

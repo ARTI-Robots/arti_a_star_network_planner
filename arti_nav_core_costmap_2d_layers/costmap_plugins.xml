@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<class_libraries>
+  <library path="lib/libarti_nav_core_costmap_2d_layers">
+    <class type="arti_nav_core_costmap_2d_layers::NetworkLayer" base_class_type="costmap_2d::Layer">
+      <description>Network layer</description>
+    </class>
+    <class type="arti_nav_core_costmap_2d_layers::NetworkPlanLayer" base_class_type="costmap_2d::Layer">
+      <description>Network plan layer</description>
+    </class>
+  </library>
+</class_libraries>
