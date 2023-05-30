@@ -25,6 +25,8 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <ctime>
 #include <std_srvs/Empty.h>
 #include <string>
+#include <arti_a_star_network_planner/AStarNetworkPlannerConfig.h>
+#include <dynamic_reconfigure/server.h>
 
 namespace arti_a_star_network_planner
 {
@@ -66,6 +68,8 @@ private:
 
   boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> getCurrentPose() const;
 
+  static double calculateDistanceAlongPath(const GraphPlan path);
+
   static double calculateDistance(
     const geometry_msgs::Pose& a_pose, const geometry_msgs::Pose& b_pose);
 
@@ -81,11 +85,17 @@ private:
   arti_graph_processing::VertexPtr getClosestVertex(
     const std::string& frame_id, const arti_nav_core_msgs::Point2DWithLimits& point) const;
 
-  static GraphPlan optimizePath(
-    GraphPlan planer_path, const arti_nav_core_msgs::Pose2DStampedWithLimits& start,
-    const arti_nav_core_msgs::Pose2DStampedWithLimits& goal);
+  GraphPlan optimizePath(
+    const GraphPlan planer_path, const arti_nav_core_msgs::Pose2DStampedWithLimits& start,
+    const arti_nav_core_msgs::Pose2DStampedWithLimits& goal) const;
 
-  void convertPath(const GraphPlan& planner_path, std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const;
+  void convertPath(const GraphPlan& planner_path,
+                  const arti_nav_core_msgs::Pose2DWithLimits& start_pose,
+                  const arti_nav_core_msgs::Pose2DWithLimits& goal_pose,
+                  std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const;
+
+  void interpolatePath(
+    std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const;
 
   static double calculatePathLength(
     const GraphPlan& path, const arti_nav_core_msgs::Pose2DStampedWithLimits& start,
@@ -106,7 +116,8 @@ private:
 
   arti_nav_core_msgs::Pose2DWithLimits convertPose(const geometry_msgs::Pose& pose, const bool reverse) const;
 
-  void updateOrientationBetweenLastPoses(arti_nav_core_msgs::Path2DWithLimits& path) const;
+
+  void updateOrientationBetweenLastPoses(std::vector<arti_nav_core_msgs::Pose2DWithLimits>& poses, const bool reverse) const;
 
   bool changeRegionCB(
     arti_move_base_msgs::ChangeRegion::Request& request, arti_move_base_msgs::ChangeRegion::Response& response);
@@ -120,17 +131,13 @@ private:
   static std::time_t getLastModificationTime(const boost::filesystem::path& path);
 
   ros::NodeHandle nh_;
+  ros::NodeHandle nh_processing_;
   boost::filesystem::path graphs_file_path_;
   std::time_t graphs_file_last_modification_time_{0};
   std::map<std::string, arti_graph_processing::GraphPtr> graph_mappings_;
   arti_graph_processing::GraphPtr current_graph_;
   boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> current_goal_;
-  double corridor_width_{1.};
-  bool bidirectional_drive_{false};
   ros::Timer periodic_check_;
-  bool skip_network_if_close_;
-  double skip_network_path_length_;
-  uint64_t max_nodes_to_skip_;
 
   std::shared_ptr<RobotInformation> robot_information_;
 
@@ -143,10 +150,11 @@ private:
 
   boost::optional<arti_graph_processing::GraphVisualizationPublisher> graph_publisher_;
   ros::Publisher graph_search_publisher_;
-  ros::Publisher start_pub_;
-  ros::Publisher start_vertex_pub_;
-  ros::Publisher goal_pub_;
-  ros::Publisher goal_vertex_pub_;
+
+  void reconfigure(const arti_a_star_network_planner::AStarNetworkPlannerConfig & new_config);
+
+  std::unique_ptr<dynamic_reconfigure::Server<arti_a_star_network_planner::AStarNetworkPlannerConfig>> cfg_server_;
+  arti_a_star_network_planner::AStarNetworkPlannerConfig cfg_;
 };
 }
 

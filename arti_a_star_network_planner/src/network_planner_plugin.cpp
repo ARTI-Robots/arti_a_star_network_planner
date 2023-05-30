@@ -36,41 +36,44 @@ namespace arti_a_star_network_planner
 void NetworkPlannerPlugin::initialize(std::string name, arti_nav_core::Transformer* transformer)
 {
   nh_ = ros::NodeHandle("~/" + name);
+  nh_processing_ = ros::NodeHandle("~/" + name+"_processing");
 
   graphs_file_path_ = nh_.param<std::string>("graphs_file_path", {});
-  corridor_width_ = nh_.param<double>("corridor_width", 1.);
-  const auto increase_factor = nh_.param<double>("increase_factor", 2.);
-  const auto edge_cost_validity_period_s = nh_.param<double>("edge_cost_validity_period_s", 100.);
-  const auto edge_cost_reset_check_period_s = nh_.param<double>("edge_cost_reset_check_period_s", 1.);
-  const auto max_number_increases = nh_.param<int>("max_number_increases", 100.);
-  bidirectional_drive_ = nh_.param<bool>("bidirectional_drive", false);
-  skip_network_if_close_ = nh_.param<bool>("skip_network_if_close", false);
-  skip_network_path_length_ = nh_.param<double>("skip_network_path_length", 1.);
-  max_nodes_to_skip_ = static_cast<uint64_t>(nh_.param<int>("max_nodes_to_skip", 1));
+  graphs_file_path_ = nh_processing_.param<std::string>("graphs_file_path", {});
+  cfg_server_.reset(
+    new dynamic_reconfigure::Server<arti_a_star_network_planner::AStarNetworkPlannerConfig>(nh_));
+  cfg_server_->setCallback(std::bind(&NetworkPlannerPlugin::reconfigure, this, std::placeholders::_1));
 
-  graph_publisher_.emplace(nh_, "navigation_network", increase_factor, max_number_increases);
-
-  loadGraphs();
-
-  graph_search_publisher_ = nh_.advertise<visualization_msgs::MarkerArray>("navigation_network_search", 1, true);
-
-  start_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("start", 1, true);
-  start_vertex_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("start_vertex", 1, true);
-  goal_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("goal", 1, true);
-  goal_vertex_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("goal_vertex", 1, true);
+  graph_search_publisher_ = nh_processing_.advertise<visualization_msgs::MarkerArray>("navigation_network_search", 1, true);
 
   robot_information_ = std::make_shared<RobotInformation>(nh_);
 
   transformer_ = transformer;
 
-  edge_correction_ = std::make_shared<EdgeCorrection>(max_number_increases, increase_factor,
-                                                      edge_cost_validity_period_s);
-
   change_region_service_ = nh_.advertiseService("change_region_service", &NetworkPlannerPlugin::changeRegionCB, this);
   reload_networks_service_ = nh_.advertiseService("reload_networks", &NetworkPlannerPlugin::reloadNetworksCB, this);
+}
 
-  periodic_check_ = nh_.createTimer(ros::Duration(edge_cost_reset_check_period_s),
+void NetworkPlannerPlugin::reconfigure(const arti_a_star_network_planner::AStarNetworkPlannerConfig& new_config)
+{
+  cfg_ = new_config;
+
+  graph_publisher_.emplace(nh_processing_, "navigation_network", cfg_.increase_factor, cfg_.max_number_increases);
+
+  loadGraphs();
+
+  edge_correction_ = std::make_shared<EdgeCorrection>(cfg_.max_number_increases, cfg_.increase_factor,
+                                                      cfg_.edge_cost_validity_period_s);
+
+  if (periodic_check_.isValid())
+  {
+    periodic_check_.setPeriod(ros::Duration(cfg_.edge_cost_reset_check_period_s));
+  }
+  else
+  {
+    periodic_check_ = nh_.createTimer(ros::Duration(cfg_.edge_cost_reset_check_period_s),
                                     &NetworkPlannerPlugin::checkResetEdgeCosts, this, false);
+  }
 }
 
 void NetworkPlannerPlugin::checkResetEdgeCosts(const ros::TimerEvent& /*e*/)
@@ -127,29 +130,12 @@ arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum NetworkPlannerPlu
     return arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum::NO_PATH_POSSIBLE;
   }
 
-  start_pub_.publish(
-    arti_nav_core_utils::convertToPoseStamped(*current_pose, arti_nav_core_utils::non_finite_values::REPLACE_BY_0));
-  //goal_pub_.publish(
-  //  arti_nav_core_utils::convertToPoseStamped(*current_goal_, arti_nav_core_utils::non_finite_values::REPLACE_BY_0));
-
-  //TODO CHECK THE NEXT N CLOSEST TO PREVENT RETURNS
+  // take the closest vertex as the path gets later anyway optimized in optimizePath()
   const arti_graph_processing::VertexPtr start_vertex = getClosestVertex(*current_pose);
-  start_vertex_pub_.publish(getVertexPose(start_vertex));
 
   const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(*current_goal_);
-  //goal_vertex_pub_.publish(getVertexPose(goal_vertex));
 
-  GraphPlan planner_path = arti_graph_processing::AStarAlgorithm::computePath(start_vertex, goal_vertex);
-
-  // check if plan was empty
-  if (planner_path.empty())
-  {
-    ROS_DEBUG_STREAM("Network planner output nothing...");
-    return arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum::NO_PATH_POSSIBLE;
-  }
-
-  // optimize start and end node
-  planner_path = optimizePath(planner_path, *current_pose, *current_goal_);
+  const GraphPlan planner_path = arti_graph_processing::AStarAlgorithm::computePath(start_vertex, goal_vertex);
 
   // check if plan was empty
   if (planner_path.empty())
@@ -160,63 +146,32 @@ arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum NetworkPlannerPlu
 
   ROS_DEBUG_STREAM("calling compute result in plan of size: " << planner_path.size());
 
-  bool ignore_planned_path = false;
-  if (skip_network_if_close_ && !planner_path.empty() && (planner_path.size() <= max_nodes_to_skip_))
-  {
-    ROS_DEBUG_STREAM("check to skip network if close");
-    const double path_length = calculatePathLength(planner_path, *current_pose, *current_goal_);
-    ROS_DEBUG_STREAM("path_length: " << path_length);
-
-    const double start_to_goal_distance = calculateDistance(current_pose->pose, current_goal_->pose);
-    ROS_DEBUG_STREAM("start_to_goal_distance: " << start_to_goal_distance);
-
-    if ((path_length < skip_network_path_length_) && (start_to_goal_distance < path_length))
-    {
-      ROS_DEBUG_STREAM("ignore planned path");
-      ignore_planned_path = true;
-    }
-  }
+  // optimize start and end node
+  const auto optimized_planner_path = optimizePath(planner_path, *current_pose, *current_goal_);
 
   plan.path_limits.header.stamp = current_pose->header.stamp;
   plan.path_limits.header.frame_id = current_graph_->getFrameName();
-  if (!ignore_planned_path)
-  {
-    plan.path_limits.poses.reserve(planner_path.size() + 2);
-  }
-  plan.path_limits.poses.push_back(current_pose->pose);
-  if (!ignore_planned_path)
-  {
-    convertPath(planner_path, plan.path_limits.poses);
-  }
-  // use current goal orientation for last position orientation
-  plan.path_limits.poses.push_back(current_goal_->pose);
+
+  plan.path_limits.poses.reserve(optimized_planner_path.size() + 2);
+
+  convertPath(optimized_planner_path, current_pose->pose, current_goal_->pose, plan.path_limits.poses);
+
   ROS_DEBUG_STREAM("path size: " << plan.path_limits.poses.size());
 
-  updateOrientationBetweenLastPoses(plan.path_limits);
-  ROS_DEBUG_STREAM("Debug theta second to last: " << plan.path_limits.poses.end()[-2].theta << " |  last:"
-                                                  << plan.path_limits.poses.end()[-1].theta);
-
+  /*
+   * Interpolation of poses
+   */
+  if(cfg_.interpolate_nodes)
+  {
+    interpolatePath(plan.path_limits.poses);
+  }
 
   ROS_DEBUG_STREAM("network planer result in plan: " << plan.path_limits);
-  // test goal conversion
-  geometry_msgs::PoseStamped pose_goal;
-  pose_goal.pose.position.x = plan.path_limits.poses.end()[-1].point.x.value;
-  pose_goal.pose.position.y = plan.path_limits.poses.end()[-1].point.y.value;
-  pose_goal.pose.orientation = tf::createQuaternionMsgFromYaw(plan.path_limits.poses.end()[-1].theta.value);
-  pose_goal.header.frame_id = plan.path_limits.header.frame_id;
-  pose_goal.header.stamp = ros::Time::now();
-  goal_pub_.publish(pose_goal);
-  //planner_path.back().second->getDestination()->getPose().pose.
-  auto goal_vert = getVertexPose(goal_vertex);
-  goal_vert.pose.orientation = pose_goal.pose.orientation;
-  goal_vertex_pub_.publish(goal_vert);
-  // End Test
 
-  // Update goal because the goal position and orientation might have changed depending 
+  // Update goal because the goal position and orientation might have changed depending
   // on the configuration (e.g. when bidirectional_drive=true))
   plan.goal.pose.header = plan.path_limits.header;
   plan.goal.pose.pose = plan.path_limits.poses.back();
-
 
   publishSearchGraph(planner_path);
 
@@ -249,7 +204,7 @@ void NetworkPlannerPlugin::handlePlannerError(
             "increaseEdgeCosts: edge: " << edge->getSource()->getName() << ", cost_before = " << cost_before
                                         << ", cost_after = " << edge->getCosts());
 
-          // also increaese cost of edge in opposite direction
+          // also increase cost of edge in opposite direction
           if (!edge->getDestination())
           {
             continue;
@@ -351,81 +306,126 @@ arti_graph_processing::GraphPtr NetworkPlannerPlugin::getGraph(const std::string
 }
 
 NetworkPlannerPlugin::GraphPlan NetworkPlannerPlugin::optimizePath(
-  GraphPlan planner_path, const arti_nav_core_msgs::Pose2DStampedWithLimits& start,
-  const arti_nav_core_msgs::Pose2DStampedWithLimits& goal)
+  const GraphPlan planner_path, const arti_nav_core_msgs::Pose2DStampedWithLimits& start,
+  const arti_nav_core_msgs::Pose2DStampedWithLimits& goal) const
 {
   if (planner_path.empty())
   {
     return planner_path;
   }
 
-  bool start_optimized = false;
-  bool prev_set = false;
-  arti_graph_processing::VertexPtr prev_node_0;
-  arti_graph_processing::VertexPtr prev_node_1;
-
-  for (auto it = planner_path.begin(); it != planner_path.end(); it++)
+  if (!cfg_.skip_network_if_close ||
+        cfg_.max_nodes_to_skip <= 0 ||
+        cfg_.skip_network_path_length <= 0.0)
   {
-    // reached end of path
-    if (!it->second)
+    return planner_path;
+  }
+
+  // handle trivial case where you directly go from the start to the goal pose
+  const double distance_from_start_to_goal_via_path = calculateDistance(planner_path.begin()->first->getPose().pose, start.pose) + 
+        calculateDistanceAlongPath(planner_path) + 
+        calculateDistance(planner_path.rbegin()->first->getPose().pose, goal.pose);
+  
+  if (planner_path.size() <= static_cast<size_t>(cfg_.max_nodes_to_skip) &&
+      distance_from_start_to_goal_via_path <= cfg_.skip_network_path_length)
+  {
+    ROS_INFO_STREAM("Directly going from start to end is shorter and allowed: direct distance from start to goal: " << 
+      calculateDistance(start.pose, goal.pose) << "; distance from start to goal via path: " << distance_from_start_to_goal_via_path);
+    return GraphPlan();
+  }
+
+  auto optimized_path = planner_path;
+
+  // optimize start point on graph
+  double distance_from_start_optimized = calculateDistance(optimized_path.begin()->first->getPose().pose, start.pose);
+  double distance_from_start_unoptimized = distance_from_start_optimized;
+  int skipped_nodes_start = 0;
+
+  for (auto if_skip_node = optimized_path.begin();
+      if_skip_node != optimized_path.end() && if_skip_node->second;
+      ++if_skip_node)
+  {
+    const double distance_to_next_node = if_skip_node->first->calculateEuclideanDistanceTo(*(if_skip_node->second->getDestination()));
+    distance_from_start_unoptimized += distance_to_next_node;
+
+    if (distance_from_start_unoptimized > cfg_.skip_network_path_length)
     {
-      if (!prev_set)
+      break;
+    }
+
+    const double distance_if_skipping_this_node = calculateDistance(if_skip_node->second->getDestination()->getPose().pose, start.pose);
+    const double distance_without_skipping_this_node = distance_from_start_optimized + distance_to_next_node;
+
+    if (distance_if_skipping_this_node < distance_without_skipping_this_node)
+    {
+      distance_from_start_optimized = distance_if_skipping_this_node;
+      skipped_nodes_start++;
+
+      ROS_INFO_STREAM("Erasing element " << skipped_nodes_start <<
+                      " from start because shorter going directly to the next node: distance from start optimized: " <<
+                      distance_from_start_optimized <<
+                      "; distance from start without skipping this node: " << distance_without_skipping_this_node);
+
+      if (skipped_nodes_start >= cfg_.max_nodes_to_skip)
       {
         break;
       }
-
-      // optimize end and stop
-      const double distance_nodes = prev_node_0->calculateEuclideanDistanceTo(*prev_node_1);
-      const double distance_node_0 = calculateDistance(prev_node_0->getPose().pose, goal.pose);
-      const double distance_node_1 = calculateDistance(prev_node_1->getPose().pose, goal.pose);
-
-      if ((distance_node_1 - distance_node_0) < distance_nodes * 1.5 ||
-          distance_node_1 < distance_nodes / 2.0)
-      {
-        //ROS_ERROR("Network Planner we should remove the end due to backturn path");
-        it = planner_path.erase(it);
-        // have to remove twice to fix it actually
-        //it = planner_path.erase(it);
-      }
-      else if (distance_node_1 < distance_nodes / 2.0)
-      {
-        //ROS_ERROR("Network Planner we should remove the end due to close distance of the goal and the last node...");
-        it = planner_path.erase(it);
-        // have to remove twice to fix it actually
-        //it = planner_path.erase(it);
-      }
-
-      break;
     }
     else
     {
-      prev_node_0 = it->second->getSource();
-      prev_node_1 = it->second->getDestination();
-      prev_set = true;
-      //ROS_DEBUG_STREAM("prev_node_0: " << prev_node_0->getName());
-      //ROS_DEBUG_STREAM("prev_node_1: " << prev_node_1->getName());
-    }
-
-    if (!start_optimized)
-    {
-      const arti_graph_processing::VertexPtr node_0 = it->second->getSource();
-      const arti_graph_processing::VertexPtr node_1 = it->second->getDestination();
-
-      const double distance_node_0 = calculateDistance(node_0->getPose().pose, start.pose);
-      const double distance_node_1 = calculateDistance(node_1->getPose().pose, start.pose);
-      const double distance_nodes = node_0->calculateEuclideanDistanceTo(*node_1);
-
-      if ((distance_node_1 - distance_node_0) < distance_nodes * 1.5)
-      {
-        // remove start - we are closer if we go directly to node 1
-        //ROS_ERROR("Network Planner we should remove the start...");
-        it = planner_path.erase(it);
-      }
-      start_optimized = true;
+      distance_from_start_optimized += distance_to_next_node;
     }
   }
 
-  return planner_path;
+  optimized_path.erase(optimized_path.begin(), optimized_path.begin() + skipped_nodes_start);
+
+
+  // optimize end point on graph
+  double distance_from_goal_optimized = calculateDistance(optimized_path.rbegin()->first->getPose().pose, goal.pose);
+  double distance_from_goal_unoptimized = distance_from_goal_optimized;
+  int skipped_nodes_goal = 0;
+
+  for (auto if_skip_node = optimized_path.rbegin(), if_skip_node_prev = std::next(optimized_path.rbegin());
+      if_skip_node != optimized_path.rend() && if_skip_node_prev != optimized_path.rend();
+      ++if_skip_node, ++if_skip_node_prev)
+  {
+    const double distance_to_previous_node = if_skip_node->first->calculateEuclideanDistanceTo(*(if_skip_node_prev->first));
+    distance_from_goal_unoptimized += distance_to_previous_node;
+
+    if (distance_from_goal_unoptimized > cfg_.skip_network_path_length)
+    {
+      break;
+    }
+
+    const double distance_if_skipping_this_node = calculateDistance(if_skip_node_prev->first->getPose().pose, goal.pose);
+    const double distance_without_skipping_this_node = distance_from_goal_optimized + distance_to_previous_node;
+
+    if (distance_if_skipping_this_node < distance_without_skipping_this_node)
+    {
+      distance_from_goal_optimized = distance_if_skipping_this_node;
+      skipped_nodes_goal++;
+
+      ROS_INFO_STREAM("Erasing element " << skipped_nodes_goal <<
+                      " from end because shorter going directly to the previous node: distance from goal optimized: " <<
+                      distance_from_goal_optimized <<
+                      "; distance from goal without skipping this node: " << distance_without_skipping_this_node);
+
+      if (skipped_nodes_goal >= cfg_.max_nodes_to_skip)
+      {
+        break;
+      }
+    }
+    else
+    {
+      distance_from_goal_optimized += distance_to_previous_node;
+    }
+  }
+
+  optimized_path.erase(optimized_path.begin() + (optimized_path.size() - skipped_nodes_goal), optimized_path.end());
+
+  ROS_INFO_STREAM("Nodes in path after optimization (excluding start and end pose): " << optimized_path.size());
+
+  return optimized_path;
 }
 
 boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> NetworkPlannerPlugin::transformPose(
@@ -476,6 +476,20 @@ boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> NetworkPlannerPlugi
   return convertPose(pose_out, false);
 }
 
+double NetworkPlannerPlugin::calculateDistanceAlongPath(const GraphPlan path)
+{
+  double distance = 0;
+  for (auto &&path_node : path)
+  {
+    if (path_node.first && path_node.second && path_node.second->getDestination())
+    {
+      distance += calculateDistance(path_node.first->getPose().pose,path_node.second->getDestination()->getPose().pose);
+    }
+  }
+
+  return distance;
+}
+
 double NetworkPlannerPlugin::calculateDistance(
   const geometry_msgs::Pose& a_pose, const geometry_msgs::Pose& b_pose)
 {
@@ -519,23 +533,50 @@ arti_graph_processing::VertexPtr NetworkPlannerPlugin::getClosestVertex(
 }
 
 void NetworkPlannerPlugin::convertPath(
-  const GraphPlan& planner_path, std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const
+    const GraphPlan& planner_path,
+    const arti_nav_core_msgs::Pose2DWithLimits& start_pose,
+    const arti_nav_core_msgs::Pose2DWithLimits& goal_pose,
+    std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const
 {
+  // if there is no planned path, then just add the start and goal pose
+  if (planner_path.empty())
+  {
+    path.push_back(start_pose);
+    path.push_back(goal_pose);
+
+    if (cfg_.bidirectional_drive)
+    {
+      // if delta between start and end pose is bigger than 90 degree, drive backwards
+      double delta_theta = tfNormalizeAngle(goal_pose.theta.value - start_pose.theta.value);
+      if (std::abs(delta_theta) > M_PI_2)
+      {
+        ROS_INFO_STREAM("Engage reverse Network drive!");
+        path.back().theta.value = tfNormalizeAngle(goal_pose.theta.value + M_PI);
+      }
+
+    }
+
+    return;
+  }
+
   bool reverse = false;
   // check for first element, then just keep driving direction
-  if (planner_path.front().second && bidirectional_drive_)
+  if (cfg_.bidirectional_drive)
   {
-    arti_nav_core_msgs::Pose2DWithLimits p1 = convertPose(planner_path.front().first->getPose().pose,
-                                                          planner_path.front().second->getDestination()->getPose().pose,
+
+    arti_nav_core_msgs::Pose2DWithLimits p1 = convertPose(arti_nav_core_utils::convertToPose(start_pose),
+                                                          planner_path.front().first->getPose().pose,
                                                           false);
     // if delta between start and end pose is bigger than 90 degree, drive backwards
-    double delta_theta = tfNormalizeAngle(p1.theta.value - getCurrentPose()->pose.theta.value);
+    double delta_theta = tfNormalizeAngle(p1.theta.value - start_pose.theta.value);
     if (std::abs(delta_theta) > M_PI_2)
     {
-      ROS_WARN_STREAM("Engage reverse Network drive!");
+      ROS_INFO_STREAM("Engage reverse Network drive!");
       reverse = true;
     }
   }
+
+  path.push_back(start_pose);
 
   for (const auto& path_segment : planner_path)
   {
@@ -549,11 +590,91 @@ void NetworkPlannerPlugin::convertPath(
     }
     else
     {
-      path.push_back(convertPose(path_segment.first->getPose().pose, reverse));
+      auto pose = path_segment.first->getPose().pose;
+
+      // If no edge is existing (i.e. the last element), then take the orientation from the edge of the previous node to this node
+      // Note that you also cannot just take the orientation from the previous node because
+      // this might be the starting node with whatever orientation the current pose has.
+
+      double dx = pose.position.x - path.back().point.x.value;
+      double dy = pose.position.y - path.back().point.y.value;
+
+      double theta = std::atan2(dy, dx);
+
+      pose.orientation = tf::createQuaternionMsgFromYaw(theta);
+
+      path.push_back(convertPose(pose, reverse));
     }
 
   }
+
+  // use current goal orientation for last pose
+  // add the additional goal pose only if the goal position differs from the last network pose, otherwise just directly use the goal pose
+  if (calculateDistance(goal_pose, path.back()) > 0.)
+  {
+    path.push_back(goal_pose);
+
+    updateOrientationBetweenLastPoses(path, reverse);
+    ROS_DEBUG_STREAM("Debug theta second to last: " << path.end()[-2].theta << " |  last:"
+                                                    << path.end()[-1].theta);
+  }
+  else
+  {
+    path.back() = current_goal_->pose;
+  }
 }
+
+void NetworkPlannerPlugin::interpolatePath(
+  std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const
+{
+
+  for(int i = 0; i+1 < path.size(); i++)
+  {
+    auto start = path.at(i);
+    auto stop = path.at(i+1);
+
+    double dx = stop.point.x.value - start.point.x.value;
+    double dy = (stop.point.y.value - start.point.y.value);
+    double distance = std::sqrt((dx*dx) + (dy*dy));
+
+    if(distance > cfg_.max_edge_interpolation_distance)
+    {
+      int div = std::ceil(distance/cfg_.max_edge_interpolation_distance);
+      ROS_DEBUG("Start Interpolation at i: %d, with [x/y]: [%f/%f], distance: %f", i, start.point.x.value, start.point
+      .y.value, distance);
+      for(int j=1; j<= div; j++)
+      {
+        arti_nav_core_msgs::Pose2DWithLimits pose;
+        pose.point.x.lower_limit = start.point.x.lower_limit;
+        pose.point.x.upper_limit = start.point.x.upper_limit;
+        pose.point.x.has_limits = start.point.x.has_limits;
+        pose.point.y.lower_limit = start.point.y.lower_limit;
+        pose.point.y.upper_limit = start.point.y.upper_limit;
+        pose.point.y.has_limits = start.point.y.has_limits;
+        pose.theta.value = start.theta.value;
+        pose.theta.has_limits = start.theta.has_limits;
+        pose.theta.lower_limit = start.theta.lower_limit;
+        pose.theta.upper_limit = start.theta.upper_limit;
+
+        pose.point.x.value = start.point.x.value+(j*dx/float(div));
+        pose.point.y.value = start.point.y.value+ (j*dy/float(div));
+        auto it = path.begin();
+        path.insert(std::next(it,(i+j)),pose);
+      }
+      i += (div-1);
+      for(int j=1; j<= div; j++)
+      {
+        ROS_DEBUG("Interpolation add point at [x/y] : [%f/%f]", path.at(i-div+j).point.x.value, path.at(i+j-div).point.y
+        .value);
+      }
+      ROS_DEBUG("Path value after inserting [%d] poses, i: %d", div-1, i);
+    }
+    ROS_DEBUG("new path pose size: %d", path.size());
+  }
+  ROS_DEBUG("Finished path interpolation");
+
+}
+
 
 double NetworkPlannerPlugin::calculatePathLength(
   const GraphPlan& path,
@@ -583,7 +704,7 @@ double NetworkPlannerPlugin::calculatePathLength(
 
     if (first_segment)
     {
-      //first segement add distance to start
+      //first segment add distance to start
       result += calculateDistance(path_segment.first->getPose().pose, start.pose);
       ROS_DEBUG_STREAM(
         "distance to start vertex " << calculateDistance(path_segment.first->getPose().pose, start.pose));
@@ -610,13 +731,13 @@ arti_nav_core_msgs::Pose2DWithLimits NetworkPlannerPlugin::convertPose(
   arti_nav_core_msgs::Pose2DWithLimits result;
   result.point.x.value = pose.position.x;
   result.point.x.has_limits = true;
-  result.point.x.lower_limit = -corridor_width_;
-  result.point.x.upper_limit = corridor_width_;
+  result.point.x.lower_limit = -cfg_.corridor_width;
+  result.point.x.upper_limit = cfg_.corridor_width;
 
   result.point.y.value = pose.position.y;
   result.point.y.has_limits = true;
-  result.point.y.lower_limit = -corridor_width_;
-  result.point.y.upper_limit = corridor_width_;
+  result.point.y.lower_limit = -cfg_.corridor_width;
+  result.point.y.upper_limit = cfg_.corridor_width;
 
   // use direction from pose to destination pose to get yaw/theta
   double dx = destination_pose.position.x - pose.position.x;
@@ -626,59 +747,58 @@ arti_nav_core_msgs::Pose2DWithLimits NetworkPlannerPlugin::convertPose(
   {
     theta = tfNormalizeAngle(theta + M_PI);
   }
-  result.theta.value = theta; // tf::getYaw(pose.orientation);
+  result.theta.value = theta;
   // Orientation is preferred but not enforced:
   result.theta.has_limits = true;
-  result.theta.lower_limit = -M_PI_4;
-  result.theta.upper_limit = +M_PI_4;
+  result.theta.lower_limit = -cfg_.theta_limit;
+  result.theta.upper_limit = +cfg_.theta_limit;
 
   return result;
 }
 
-void NetworkPlannerPlugin::updateOrientationBetweenLastPoses(arti_nav_core_msgs::Path2DWithLimits& path) const
+void NetworkPlannerPlugin::updateOrientationBetweenLastPoses(std::vector<arti_nav_core_msgs::Pose2DWithLimits>& poses, const bool reverse) const
 {
-  // dont modify orientation if only start and end position (no inbetween poses)
-  if (path.poses.size() <= 2)
+  // don't modify orientation if only start and end position (no in-between poses)
+  if (poses.size() <= 2)
   {
     return;
   }
 
-  double x1 = path.poses.end()[-2].point.x.value;
-  double y1 = path.poses.end()[-2].point.y.value;
+  double x1 = poses.end()[-2].point.x.value;
+  double y1 = poses.end()[-2].point.y.value;
 
-  double x2 = path.poses.end()[-1].point.x.value;
-  double y2 = path.poses.end()[-1].point.y.value;
+  double x2 = poses.end()[-1].point.x.value;
+  double y2 = poses.end()[-1].point.y.value;
 
   // use direction from pose to destination pose to get yaw/theta
   double dx = x2 - x1;
   double dy = y2 - y1;
-  std::atan2(dy, dx);
-  double theta = std::atan2(dy, dx); //tf::getYaw(.orientation);
-  double t1 = path.poses.end()[-2].theta.value;
-  double t2 = path.poses.end()[-1].theta.value;
-  if (bidirectional_drive_)
-  {
+  double theta_to_goal = std::atan2(dy, dx);
 
-    // if delta between start and end pose is bigger than 90 degree, drive backwards
-    if (std::abs(tfNormalizeAngle(t1 - t2)) > M_PI_2)
+  double t2 = poses.end()[-1].theta.value;
+
+  if (cfg_.bidirectional_drive)
+  {
+    // if we're driving in backwards direction, we remain in that direction.
+    if (reverse)
+    {
+      theta_to_goal = tfNormalizeAngle(theta_to_goal + M_PI);
+    }
+
+    // if delta between the new second last and last orientation is bigger than 90 degree,
+    // we're driving in a different direction than the end pose and we should rotate the end pose
+    if (std::abs(tfNormalizeAngle(theta_to_goal - t2)) > M_PI_2)
     {
       t2 = tfNormalizeAngle(t2 + M_PI);
-      ROS_WARN_STREAM("rotate endpose 180 Degree!");
-      ROS_DEBUG_STREAM(" t1: \n [ " << path.poses.end()[-1].theta << " ] \n theta new: " << t2);
-      path.poses.end()[-1].theta.value = t2; //fNormalizeAngle(t2 + M_PI);
-
+      ROS_INFO_STREAM("rotate end pose 180 Degree!");
+      ROS_DEBUG_STREAM(" t1: \n [ " << poses.end()[-1].theta << " ] \n theta new: " << t2);
+      poses.end()[-1].theta.value = t2;
     }
-    if (std::abs(tfNormalizeAngle(theta - t2)) > M_PI_2)
-    {
-      theta = tfNormalizeAngle(theta + M_PI);
-    }
-    //ROS_WARN_STREAM(" theta [-1]: \n [ " << path.poses.end()[-1].theta.value << " ] \n  [-2]: " <<t1 << " \n [-3]: "
-    //                  << path.poses.end()[-3].theta.value << " \n atan2(dy,dx): " << theta);
-
   }
-  path.poses.end()[-1].theta.lower_limit = -M_PI_4;
-  path.poses.end()[-1].theta.upper_limit = +M_PI_4;
-  path.poses.end()[-2].theta.value = theta;
+
+  poses.end()[-1].theta.lower_limit = -cfg_.theta_limit;
+  poses.end()[-1].theta.upper_limit = +cfg_.theta_limit;
+  poses.end()[-2].theta.value = theta_to_goal;
 }
 
 arti_nav_core_msgs::Pose2DStampedWithLimits NetworkPlannerPlugin::convertPose(
@@ -697,23 +817,23 @@ arti_nav_core_msgs::Pose2DWithLimits NetworkPlannerPlugin::convertPose(
   arti_nav_core_msgs::Pose2DWithLimits result;
   result.point.x.value = pose.position.x;
   result.point.x.has_limits = true;
-  result.point.x.lower_limit = -corridor_width_;
-  result.point.x.upper_limit = corridor_width_;
+  result.point.x.lower_limit = -cfg_.corridor_width;
+  result.point.x.upper_limit = cfg_.corridor_width;
 
   result.point.y.value = pose.position.y;
   result.point.y.has_limits = true;
-  result.point.y.lower_limit = -corridor_width_;
-  result.point.y.upper_limit = corridor_width_;
+  result.point.y.lower_limit = -cfg_.corridor_width;
+  result.point.y.upper_limit = cfg_.corridor_width;
 
   result.theta.value = tf::getYaw(pose.orientation);
   if (reverse)
   {
     result.theta.value = tfNormalizeAngle(result.theta.value + M_PI);
   }
-  // Orientation is preferred but not enforced:
+
   result.theta.has_limits = true;
-  result.theta.lower_limit = -M_PI_4;
-  result.theta.upper_limit = M_PI_4;
+  result.theta.lower_limit = -cfg_.theta_limit;
+  result.theta.upper_limit = cfg_.theta_limit;
 
   return result;
 }
