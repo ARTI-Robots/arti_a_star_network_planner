@@ -39,7 +39,7 @@ void NetworkPlannerPlugin::initialize(std::string name, arti_nav_core::Transform
   nh_processing_ = ros::NodeHandle("~/" + name+"_processing");
 
   graphs_file_path_ = nh_.param<std::string>("graphs_file_path", {});
-  graphs_file_path_ = nh_processing_.param<std::string>("graphs_file_path", {});
+  //graphs_file_path_ = nh_processing_.param<std::string>("graphs_file_path", {});
   cfg_server_.reset(
     new dynamic_reconfigure::Server<arti_a_star_network_planner::AStarNetworkPlannerConfig>(nh_));
   cfg_server_->setCallback(std::bind(&NetworkPlannerPlugin::reconfigure, this, std::placeholders::_1));
@@ -52,6 +52,8 @@ void NetworkPlannerPlugin::initialize(std::string name, arti_nav_core::Transform
 
   change_region_service_ = nh_.advertiseService("change_region_service", &NetworkPlannerPlugin::changeRegionCB, this);
   reload_networks_service_ = nh_.advertiseService("reload_networks", &NetworkPlannerPlugin::reloadNetworksCB, this);
+
+  get_plan_service = nh_.advertiseService("get_network_plan", &NetworkPlannerPlugin::getPlanServiceCB, this);
 }
 
 void NetworkPlannerPlugin::reconfigure(const arti_a_star_network_planner::AStarNetworkPlannerConfig& new_config)
@@ -90,16 +92,17 @@ void NetworkPlannerPlugin::checkResetEdgeCosts(const ros::TimerEvent& /*e*/)
 
   if (current_graph_)
   {
+    ROS_DEBUG("check current graph for edge_costs that need to be reset");
     const auto& edges_of_graph = current_graph_->getEdges();
     ros::Time current_time = ros::Time::now();
 
-    ROS_DEBUG_STREAM("check ResetEdgeCosts, edges_of_graph.size() = " << edges_of_graph.size());
-
     for (const auto& edge : edges_of_graph)
     {
-      edge_correction_->resetEdgeCostIfExpired(*std::dynamic_pointer_cast<Edge>(edge), current_time);
+      edge_correction_->resetEdgeCostIfExpired(*std::dynamic_pointer_cast<arti_a_star_network_planner::Edge>(edge), current_time);
     }
-    graph_publisher_->publish(*current_graph_);
+    ROS_DEBUG("Done checking edges, publish graph");
+    graph_publisher_->publish(*current_graph_unprocessed_);
+    graph_publisher_->publish(*current_graph_, true);
   }
 }
 
@@ -161,7 +164,7 @@ arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum NetworkPlannerPlu
   /*
    * Interpolation of poses
    */
-  if(cfg_.interpolate_nodes)
+  if(cfg_.interpolate_resulting_path)
   {
     interpolatePath(plan.path_limits.poses);
   }
@@ -234,7 +237,8 @@ void NetworkPlannerPlugin::handlePlannerError(
       }
     }
 
-    graph_publisher_->publish(*current_graph_);
+    graph_publisher_->publish(*current_graph_unprocessed_);
+    graph_publisher_->publish(*current_graph_, true);
   }
 }
 
@@ -273,25 +277,41 @@ void NetworkPlannerPlugin::loadGraphs()
   {
     ROS_ERROR_STREAM("started network planner without a network");
     current_graph_.reset();
+    current_graph_unprocessed_.reset();
     graph_publisher_->publish(arti_graph_processing::Graph{{}, "map"});
+    graph_publisher_->publish(arti_graph_processing::Graph{{}, "map"}, true);
   }
   else
   {
     // If a current graph was set before, try to choose the graph of the same name:
-    if (current_graph_)
+    if (current_graph_unprocessed_)
     {
-      current_graph_ = getGraph(current_graph_->getName());
+      current_graph_unprocessed_ = getGraph(current_graph_unprocessed_->getName());
     }
 
     // If no current graph was set before, or there was no graph of the same name, select one of the loaded graphs:
-    if (!current_graph_)
+    if (!current_graph_unprocessed_)
     {
-      current_graph_ = graph_mappings_.begin()->second;
+      current_graph_unprocessed_ = graph_mappings_.begin()->second;
     }
 
+    if(cfg_.interpolate_graph && current_graph_unprocessed_)
+    {
+      current_graph_ = graph_loader.interpolateGraph(current_graph_unprocessed_, cfg_
+      .max_edge_distance, arti_ros_param::RootParam{ros::NodeHandle{nh_ , "graphs"}});
+
+      ROS_INFO("publish interpolated graph now");
+      graph_publisher_->publish(*current_graph_, true);
+    }
+    else
+    {
+      current_graph_ = current_graph_unprocessed_;
+    }
     //arti_graph_processing::FloydWarshallAlgorithm::computeDistanceValues(*current_graph_);
 
-    graph_publisher_->publish(*current_graph_);
+
+    graph_publisher_->publish(*current_graph_unprocessed_);
+    ROS_DEBUG("graph publishing done!");
   }
 }
 
@@ -476,6 +496,8 @@ boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> NetworkPlannerPlugi
   return convertPose(pose_out, false);
 }
 
+
+
 double NetworkPlannerPlugin::calculateDistanceAlongPath(const GraphPlan path)
 {
   double distance = 0;
@@ -628,21 +650,21 @@ void NetworkPlannerPlugin::interpolatePath(
   std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const
 {
 
-  for(int i = 0; i+1 < path.size(); i++)
+  for(ssize_t i = 0; i+1 < path.size(); i++)
   {
     auto start = path.at(i);
     auto stop = path.at(i+1);
 
     double dx = stop.point.x.value - start.point.x.value;
     double dy = (stop.point.y.value - start.point.y.value);
-    double distance = std::sqrt((dx*dx) + (dy*dy));
+    double distance = std::hypot(dx , dy);
 
-    if(distance > cfg_.max_edge_interpolation_distance)
+    if(distance > cfg_.max_path_distance)
     {
-      int div = std::ceil(distance/cfg_.max_edge_interpolation_distance);
-      ROS_DEBUG("Start Interpolation at i: %d, with [x/y]: [%f/%f], distance: %f", i, start.point.x.value, start.point
+      int div = std::ceil(distance/cfg_.max_path_distance);
+      ROS_DEBUG("Start Interpolation at i: %zu, with [x/y]: [%f/%f], distance: %f", i, start.point.x.value, start.point
       .y.value, distance);
-      for(int j=1; j<= div; j++)
+      for(int j=1; j < div; j++)
       {
         arti_nav_core_msgs::Pose2DWithLimits pose;
         pose.point.x.lower_limit = start.point.x.lower_limit;
@@ -656,20 +678,20 @@ void NetworkPlannerPlugin::interpolatePath(
         pose.theta.lower_limit = start.theta.lower_limit;
         pose.theta.upper_limit = start.theta.upper_limit;
 
-        pose.point.x.value = start.point.x.value+(j*dx/float(div));
-        pose.point.y.value = start.point.y.value+ (j*dy/float(div));
+        pose.point.x.value = start.point.x.value + (float(j)*dx/float(div));
+        pose.point.y.value = start.point.y.value + (float(j)*dy/float(div));
         auto it = path.begin();
         path.insert(std::next(it,(i+j)),pose);
       }
       i += (div-1);
       for(int j=1; j<= div; j++)
       {
-        ROS_DEBUG("Interpolation add point at [x/y] : [%f/%f]", path.at(i-div+j).point.x.value, path.at(i+j-div).point.y
+        ROS_INFO("Interpolation add point at [x/y] : [%f/%f]", path.at(i-div+j).point.x.value, path.at(i+j-div).point.y
         .value);
       }
       ROS_DEBUG("Path value after inserting [%d] poses, i: %d", div-1, i);
     }
-    ROS_DEBUG("new path pose size: %d", path.size());
+    ROS_DEBUG("new path pose size: %zu", path.size());
   }
   ROS_DEBUG("Finished path interpolation");
 
@@ -844,8 +866,26 @@ bool NetworkPlannerPlugin::changeRegionCB(
   const auto new_graph = getGraph(request.region_name);
   if (new_graph)
   {
-    current_graph_ = new_graph;
-    graph_publisher_->publish(*current_graph_);
+
+    if(cfg_.interpolate_graph)
+    {
+      const arti_ros_param::RootParam root_param = arti_ros_param::loadYaml(graphs_file_path_.string());
+      if (root_param.exists()) {
+        GraphLoader graph_loader;
+        current_graph_unprocessed_ = new_graph;
+        current_graph_ = graph_loader.interpolateGraph(current_graph_unprocessed_, cfg_.max_edge_distance, root_param);
+      }
+      else{
+        ROS_ERROR("loading interpolated path fail because of missing root param");
+      }
+    }
+    else
+    {
+      current_graph_ = new_graph;
+    }
+    graph_publisher_->publish(*current_graph_unprocessed_);
+    graph_publisher_->publish(*current_graph_, true);
+
     return true;
   }
   else
@@ -862,6 +902,72 @@ bool NetworkPlannerPlugin::reloadNetworksCB(
   return true;
 }
 
+bool NetworkPlannerPlugin::getPlanServiceCB(arti_move_base_msgs::GetNetworkPlan::Request& request, arti_move_base_msgs::GetNetworkPlan::Response& response)
+{
+  if(current_graph_)
+  {
+
+    //arti_nav_core_utils::convert
+
+    arti_nav_core_msgs::Pose2DStampedWithLimits start_2d = convertPose(request.start, false);
+    arti_nav_core_msgs::Pose2DStampedWithLimits target_2d = convertPose(request.target, false);
+    // Transform to path frame
+
+    auto temp = transformPose(start_2d);
+    auto temp2 = transformPose(target_2d);
+    if( temp && temp2)
+    {
+      start_2d = *temp;
+      target_2d = *temp2;
+    }
+    else {
+      ROS_ERROR("no transform for start/target Pose");
+      return false;
+    }
+
+    // take the closest vertex as the path gets later anyway optimized in optimizePath()
+    const arti_graph_processing::VertexPtr start_vertex = getClosestVertex(start_2d);
+    const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(target_2d);
+
+
+    if(start_vertex && goal_vertex)
+    {
+      const GraphPlan planner_path = arti_graph_processing::AStarAlgorithm::computePath(start_vertex, goal_vertex);
+      if (planner_path.empty())
+      {
+        ROS_DEBUG_STREAM("Network planner output empty!!!");
+//        return arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum::NO_PATH_POSSIBLE;
+        return false;
+      }
+//      const auto optimized_planner_path = optimizePath(planner_path, *current_pose, *current_goal_);
+
+      arti_nav_core_msgs::Movement2DGoalWithConstraints plan;
+      plan.path_limits.header.stamp = start_2d.header.stamp;
+      plan.path_limits.header.frame_id = current_graph_->getFrameName();
+
+      plan.path_limits.poses.reserve(planner_path.size() + 2);
+
+//      arti_nav_core_utils::convertToPose2D()
+      convertPath(planner_path, start_2d.pose, target_2d.pose, plan.path_limits.poses);
+      // TODO add publisher to seperated topic?
+//      plan.path_limits.poses
+      nav_msgs::Path out = arti_nav_core_utils::convertToPath(plan.path_limits);
+      response.path = out;
+      return true;
+    }
+    else
+    {
+      ROS_ERROR("target or goal couldn't get a nearest node");
+      return false;
+    }
+  }
+  else
+  {
+    ROS_ERROR("No Graph loaded!!!");
+    return false;
+  }
+}
+
 void NetworkPlannerPlugin::publishSearchGraph(
   const std::vector<std::pair<arti_graph_processing::VertexPtr,
     arti_graph_processing::EdgePtr>>& planner_path)
@@ -873,7 +979,10 @@ void NetworkPlannerPlugin::publishSearchGraph(
     edges_marker.ns = "edges";
     edges_marker.id = 0;
     edges_marker.action = visualization_msgs::Marker::ADD;
-    edges_marker.type = visualization_msgs::Marker::LINE_LIST;
+//    edges_marker.type = visualization_msgs::Marker::LINE_LIST;
+    //for arrow x is diameter y head diameter  If scale.z is not zero, it specifies the head length
+    //for line_list only x is used, controls the width of the line
+    edges_marker.type = visualization_msgs::Marker::ARROW;
     edges_marker.header.frame_id = current_graph_->getFrameName();
     edges_marker.header.stamp = ros::Time::now();
     edges_marker.color.r = 1;
@@ -882,6 +991,9 @@ void NetworkPlannerPlugin::publishSearchGraph(
     edges_marker.color.a = 1.;
     edges_marker.pose.orientation.w = 1.;
     edges_marker.scale.x = 0.1;
+    edges_marker.scale.y = 0.1;
+    edges_marker.scale.z = 0.001;
+
     edges_marker.points.reserve(planner_path.size() * 2);
 
 
@@ -899,9 +1011,12 @@ void NetworkPlannerPlugin::publishSearchGraph(
       {
         edges_marker.points.push_back(source->getPose().pose.position);
         edges_marker.points.push_back(destination->getPose().pose.position);
+        graph_markers.markers.push_back(edges_marker);
+        edges_marker.id++;
+        edges_marker.points.clear();
       }
     }
-    graph_markers.markers.push_back(edges_marker);
+
 
     graph_search_publisher_.publish(graph_markers);
   }

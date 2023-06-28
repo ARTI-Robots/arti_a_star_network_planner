@@ -21,6 +21,7 @@ find_package(catkin REQUIRED COMPONENTS
   visualization_msgs
   arti_graph_processing
   angles
+  nav_msgs
 )
 
 ## System dependencies are found with CMake's conventions
@@ -53,6 +54,11 @@ generate_dynamic_reconfigure_options(
   cfg/AStarNetworkPlanner.cfg
 )
 
+generate_messages(
+        DEPENDENCIES
+        actionlib_msgs
+        arti_move_base_msgs
+)
 ###################################
 ## catkin specific configuration ##
 ###################################

@@ -20,6 +20,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 #include <arti_graph_processing/graph_visualization_publisher.h>
 #include <arti_graph_processing/types.h>
 #include <arti_move_base_msgs/ChangeRegion.h>
+#include <arti_move_base_msgs/GetNetworkPlan.h>
 #include <boost/filesystem/path.hpp>
 #include <boost/optional.hpp>
 #include <ctime>
@@ -45,6 +46,8 @@ public:
   void handlePlannerError(
     const arti_nav_core_msgs::Pose2DWithLimits& error_pose_a,
     const arti_nav_core_msgs::Pose2DWithLimits& error_pose_b) override;
+
+  ros::ServiceServer get_plan_service;
 
 private:
   using GraphPlan = std::vector<std::pair<arti_graph_processing::VertexPtr, arti_graph_processing::EdgePtr>>;
@@ -123,6 +126,9 @@ private:
     arti_move_base_msgs::ChangeRegion::Request& request, arti_move_base_msgs::ChangeRegion::Response& response);
   bool reloadNetworksCB(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response);
 
+  bool getPlanServiceCB(
+          arti_move_base_msgs::GetNetworkPlan::Request& request, arti_move_base_msgs::GetNetworkPlan::Response& response);
+
   void publishSearchGraph(
     const std::vector<std::pair<arti_graph_processing::VertexPtr,
       arti_graph_processing::EdgePtr>>& planer_path);
@@ -135,6 +141,7 @@ private:
   boost::filesystem::path graphs_file_path_;
   std::time_t graphs_file_last_modification_time_{0};
   std::map<std::string, arti_graph_processing::GraphPtr> graph_mappings_;
+  arti_graph_processing::GraphPtr current_graph_unprocessed_;
   arti_graph_processing::GraphPtr current_graph_;
   boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> current_goal_;
   ros::Timer periodic_check_;
