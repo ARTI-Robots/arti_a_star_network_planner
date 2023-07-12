@@ -186,11 +186,27 @@ void NetworkPlannerPlugin::handlePlannerError(
 {
   if (current_graph_ && edge_correction_)
   {
+  /*
     const arti_graph_processing::VertexPtr start_vertex = getClosestVertex(current_graph_->getFrameName(),
                                                                            error_pose_a.point);
     const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(current_graph_->getFrameName(),
                                                                           error_pose_b.point);
-
+*/
+    arti_nav_core_msgs::Pose2DStampedWithLimits pose_a;
+    pose_a.pose = error_pose_a;
+    pose_a.header.frame_id = "map";
+    pose_a.header.stamp = ros::Time::now();
+    arti_nav_core_msgs::Pose2DStampedWithLimits pose_b;
+    pose_b.pose = error_pose_b;
+    pose_b.header.frame_id = "map";
+    pose_b.header.stamp = ros::Time::now();
+    auto pose_a_trans = transformPose(pose_a);
+    auto pose_b_trans = transformPose(pose_b);
+    const arti_graph_processing::VertexPtr start_vertex = getClosestVertex(current_graph_->getFrameName(),
+                                                                           pose_a_trans->pose.point);
+    const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(current_graph_->getFrameName(),
+                                                                          pose_b_trans->pose.point);
+                                                                          
     const GraphPlan planner_path = arti_graph_processing::AStarAlgorithm::computePath(start_vertex, goal_vertex);
 
     for (const auto& path_segment : planner_path)
