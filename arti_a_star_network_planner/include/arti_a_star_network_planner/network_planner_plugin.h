@@ -81,6 +81,9 @@ private:
 
   static double calculateDistance(
     const arti_nav_core_msgs::Pose2DWithLimits& a_pose, const arti_nav_core_msgs::Pose2DWithLimits& b_pose);
+    
+ double calculateDistance(
+            const arti_nav_core_msgs::Pose2DStampedWithLimits& a_pose, const arti_nav_core_msgs::Pose2DStampedWithLimits& b_pose);
 
   arti_graph_processing::VertexPtr getClosestVertex(
     const arti_nav_core_msgs::Pose2DStampedWithLimits& pose) const;

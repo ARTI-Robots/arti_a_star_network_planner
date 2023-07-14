@@ -186,12 +186,10 @@ void NetworkPlannerPlugin::handlePlannerError(
 {
   if (current_graph_ && edge_correction_)
   {
-  /*
-    const arti_graph_processing::VertexPtr start_vertex = getClosestVertex(current_graph_->getFrameName(),
-                                                                           error_pose_a.point);
-    const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(current_graph_->getFrameName(),
-                                                                          error_pose_b.point);
-*/
+//    const arti_graph_processing::VertexPtr start_vertex = getClosestVertex(current_graph_->getFrameName(),
+//                                                                           error_pose_a.point);
+//    const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(current_graph_->getFrameName(),
+//                                                                          error_pose_b.point);
     arti_nav_core_msgs::Pose2DStampedWithLimits pose_a;
     pose_a.pose = error_pose_a;
     pose_a.header.frame_id = "map";
@@ -206,51 +204,71 @@ void NetworkPlannerPlugin::handlePlannerError(
                                                                            pose_a_trans->pose.point);
     const arti_graph_processing::VertexPtr goal_vertex = getClosestVertex(current_graph_->getFrameName(),
                                                                           pose_b_trans->pose.point);
-                                                                          
+
     const GraphPlan planner_path = arti_graph_processing::AStarAlgorithm::computePath(start_vertex, goal_vertex);
 
-    for (const auto& path_segment : planner_path)
+    auto robot_pose = getCurrentPose();
+    double min_distance = std::numeric_limits<double>::max();
+    int edge_index;
+    // find edge in path that starts from the nearest pose of the robot
+    for(int i = 0; i < planner_path.size(); i++)
     {
-      if (path_segment.second)  // Last segment has no edge, only goal vertex
-      {
-        const auto edge = std::dynamic_pointer_cast<Edge>(path_segment.second);
-        if (edge)
-        {
-          ros::Time current_time = ros::Time::now();
-          const double cost_before = edge->getCosts();
-          edge_correction_->increaseEdgeCosts(*edge, current_time);
-          ROS_WARN_STREAM(
-            "increaseEdgeCosts: edge: " << edge->getSource()->getName() << ", cost_before = " << cost_before
-                                        << ", cost_after = " << edge->getCosts());
-
-          // also increase cost of edge in opposite direction
-          if (!edge->getDestination())
-          {
-            continue;
-          }
-
-          const auto& edges_from_dest = edge->getDestination()->getOutgoingEdges();
-
-          for (const auto& dest_edge : edges_from_dest)
-          {
-            const arti_graph_processing::VertexPtr dest_edge_destination = dest_edge->getDestination();
-
-            if (dest_edge_destination == edge->getSource())
-            {
-              const auto my_edge = std::dynamic_pointer_cast<Edge>(dest_edge);
-              const double my_cost_before = my_edge->getCosts();
-              edge_correction_->increaseEdgeCosts(*my_edge, current_time);
-              ROS_WARN_STREAM(
-                "increaseEdgeCosts , edge " << my_edge->getSource()->getName() << " cost_before = " << my_cost_before
-                                            << ", cost_after = " << my_edge->getCosts());
-            }
-          }
-        }
-        else
-        {
-          ROS_FATAL_STREAM("edge has wrong type, this should never happen");
+      auto& segment = planner_path.at(i);
+      // BETTER increase last edge  between robot and an obstacle
+      if(segment.second) {
+        auto v_pose = convertPose(segment.first->getPose(), false);
+        double dist = calculateDistance(*robot_pose, v_pose);
+        if(dist < min_distance) {
+          min_distance = dist;
+          edge_index = i;
         }
       }
+    }
+    //TODO Replace with check of vertex being in front of Robot or behind. Edges in front should be increased, if behind, use next one, turn orientation around if drive direction is reverse?
+    if( edge_index < (planner_path.size()-2)  )
+    {
+      edge_index++;
+    }
+    const auto& path_segment = planner_path.at(edge_index);
+    if(!path_segment.second)
+    {
+      ROS_WARN("map error poses a [%f/%f] | b=[%f/%f]", error_pose_a.point.x.value, error_pose_a.point.y.value, error_pose_b.point.x.value,error_pose_b.point.y.value);
+      ROS_ERROR("No edge in path index: %d, path size [%zu]", edge_index, planner_path.size());
+    }
+    const auto edge = std::dynamic_pointer_cast<Edge>(path_segment.second);
+
+    //const auto edge = std::dynamic_pointer_cast<Edge>(path_segment.second);
+    if (edge)
+    {
+      ros::Time current_time = ros::Time::now();
+      const double cost_before = edge->getCosts();
+      edge_correction_->increaseEdgeCosts(*edge, current_time);
+      ROS_WARN_STREAM(
+        "increaseEdgeCosts: edge: " << edge->getSource()->getName() << ", cost_before = " << cost_before
+                                    << ", cost_after = " << edge->getCosts());
+
+      // also increase cost of edge in opposite direction
+
+      const auto& edges_from_dest = edge->getDestination()->getOutgoingEdges();
+
+      for (const auto& dest_edge : edges_from_dest)
+      {
+        const arti_graph_processing::VertexPtr dest_edge_destination = dest_edge->getDestination();
+
+        if (dest_edge_destination == edge->getSource())
+        {
+          const auto my_edge = std::dynamic_pointer_cast<Edge>(dest_edge);
+          const double my_cost_before = my_edge->getCosts();
+          edge_correction_->increaseEdgeCosts(*my_edge, current_time);
+          ROS_WARN_STREAM(
+            "increaseEdgeCosts Reverse , edge " << my_edge->getSource()->getName() << " cost_before = " << my_cost_before
+                                        << ", cost_after = " << my_edge->getCosts());
+        }
+      }
+    }
+    else
+    {
+      ROS_ERROR("No edge found, this should never happen");
     }
 
     graph_publisher_->publish(*current_graph_unprocessed_);
@@ -512,8 +530,6 @@ boost::optional<arti_nav_core_msgs::Pose2DStampedWithLimits> NetworkPlannerPlugi
   return convertPose(pose_out, false);
 }
 
-
-
 double NetworkPlannerPlugin::calculateDistanceAlongPath(const GraphPlan path)
 {
   double distance = 0;
@@ -546,6 +562,22 @@ double NetworkPlannerPlugin::calculateDistance(
   return std::hypot(a_pose.point.x.value - b_pose.point.x.value, a_pose.point.y.value - b_pose.point.y.value);
 }
 
+  double NetworkPlannerPlugin::calculateDistance(
+          const arti_nav_core_msgs::Pose2DStampedWithLimits& a_pose, const arti_nav_core_msgs::Pose2DStampedWithLimits& b_pose)
+  {
+    if(a_pose.header.frame_id == b_pose.header.frame_id ) {
+      return std::hypot(a_pose.pose.point.x.value - b_pose.pose.point.x.value, a_pose.pose.point.y.value - b_pose.pose.point.y.value);
+    }
+    else
+    {
+      auto p1 = transformPose(a_pose);
+      auto p2 = transformPose(b_pose);
+
+      return std::hypot(p1->pose.point.x.value - p2->pose.point.x.value, p1->pose.point.y.value - p2->pose.point.y.value);
+
+    }
+  }
+
 arti_graph_processing::VertexPtr NetworkPlannerPlugin::getClosestVertex(
   const arti_nav_core_msgs::Pose2DStampedWithLimits& pose) const
 {
@@ -576,37 +608,27 @@ void NetworkPlannerPlugin::convertPath(
     const arti_nav_core_msgs::Pose2DWithLimits& goal_pose,
     std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const
 {
-  // if there is no planned path, then just add the start and goal pose
+  // check for first element, then just keep driving direction
+  bool reverse = false;
+  // use direction from starting pose to next pose to get yaw/theta
+  double theta_to_next_pose = 0.0;
   if (planner_path.empty())
   {
-    path.push_back(start_pose);
-    path.push_back(goal_pose);
-
-    if (cfg_.bidirectional_drive)
-    {
-      // if delta between start and end pose is bigger than 90 degree, drive backwards
-      double delta_theta = tfNormalizeAngle(goal_pose.theta.value - start_pose.theta.value);
-      if (std::abs(delta_theta) > M_PI_2)
-      {
-        ROS_INFO_STREAM("Engage reverse Network drive!");
-        path.back().theta.value = tfNormalizeAngle(goal_pose.theta.value + M_PI);
-      }
-
-    }
-
-    return;
+    double dx = goal_pose.point.x.value - start_pose.point.x.value;
+    double dy = goal_pose.point.y.value - start_pose.point.y.value;
+    theta_to_next_pose = std::atan2(dy, dx);
+  }
+  else
+  {
+    double dx = planner_path.front().first->getPose().pose.position.x - start_pose.point.x.value;
+    double dy = planner_path.front().first->getPose().pose.position.y - start_pose.point.y.value;
+    theta_to_next_pose = std::atan2(dy, dx);
   }
 
-  bool reverse = false;
-  // check for first element, then just keep driving direction
   if (cfg_.bidirectional_drive)
   {
-
-    arti_nav_core_msgs::Pose2DWithLimits p1 = convertPose(arti_nav_core_utils::convertToPose(start_pose),
-                                                          planner_path.front().first->getPose().pose,
-                                                          false);
-    // if delta between start and end pose is bigger than 90 degree, drive backwards
-    double delta_theta = tfNormalizeAngle(p1.theta.value - start_pose.theta.value);
+    // if delta between start pose and start to next pose is bigger than 90 degree, drive backwards
+    double delta_theta = tfNormalizeAngle(theta_to_next_pose - start_pose.theta.value);
     if (std::abs(delta_theta) > M_PI_2)
     {
       ROS_INFO_STREAM("Engage reverse Network drive!");
@@ -616,6 +638,14 @@ void NetworkPlannerPlugin::convertPath(
 
   path.push_back(start_pose);
 
+  // update the first orientation based on the orientation to the next element including if reverse or not
+  path.front().theta.value = theta_to_next_pose;
+  if (reverse)
+  {
+    path.front().theta.value = tfNormalizeAngle(path.front().theta.value + M_PI);
+  }
+
+  // add the planned path of the navigation network
   for (const auto& path_segment : planner_path)
   {
     //ROS_DEBUG_STREAM("path_segment.first->getName(): " << path_segment.first->getName());
@@ -624,7 +654,7 @@ void NetworkPlannerPlugin::convertPath(
       //ROS_DEBUG_STREAM("path_segment.second->getDestination().getName(): " << path_segment.second->getDestination()->getName());
 
       path.push_back(convertPose(path_segment.first->getPose().pose,
-                                 path_segment.second->getDestination()->getPose().pose, reverse));
+                                path_segment.second->getDestination()->getPose().pose, reverse));
     }
     else
     {
@@ -651,22 +681,23 @@ void NetworkPlannerPlugin::convertPath(
   if (calculateDistance(goal_pose, path.back()) > 0.)
   {
     path.push_back(goal_pose);
-
-    updateOrientationBetweenLastPoses(path, reverse);
-    ROS_DEBUG_STREAM("Debug theta second to last: " << path.end()[-2].theta << " |  last:"
-                                                    << path.end()[-1].theta);
   }
   else
   {
-    path.back() = current_goal_->pose;
+    path.back() = goal_pose;
   }
+  updateOrientationBetweenLastPoses(path, reverse);
+  ROS_DEBUG_STREAM("Debug theta second to last: " << path.end()[-2].theta << " |  last:"
+                                                  << path.end()[-1].theta);
+
+  return;
 }
 
 void NetworkPlannerPlugin::interpolatePath(
   std::vector<arti_nav_core_msgs::Pose2DWithLimits>& path) const
 {
 
-  for(ssize_t i = 0; i+1 < path.size(); i++)
+  for(size_t i = 0; i+1 < path.size(); i++)
   {
     auto start = path.at(i);
     auto stop = path.at(i+1);
@@ -705,7 +736,7 @@ void NetworkPlannerPlugin::interpolatePath(
         ROS_INFO("Interpolation add point at [x/y] : [%f/%f]", path.at(i-div+j).point.x.value, path.at(i+j-div).point.y
         .value);
       }
-      ROS_DEBUG("Path value after inserting [%d] poses, i: %d", div-1, i);
+      ROS_DEBUG("Path value after inserting [%d] poses, i: %zu", div-1, i);
     }
     ROS_DEBUG("new path pose size: %zu", path.size());
   }
@@ -796,9 +827,11 @@ arti_nav_core_msgs::Pose2DWithLimits NetworkPlannerPlugin::convertPose(
 
 void NetworkPlannerPlugin::updateOrientationBetweenLastPoses(std::vector<arti_nav_core_msgs::Pose2DWithLimits>& poses, const bool reverse) const
 {
-  // don't modify orientation if only start and end position (no in-between poses)
-  if (poses.size() <= 2)
+  // This check is just to be sure but there should not be any case where there is happens
+  if (poses.size() < 2)
   {
+    ROS_FATAL_STREAM("A* network planner wants to update the orientation between the last poses "
+                     "but there was not even a start and goal pose in the planned poses");
     return;
   }
 
@@ -952,7 +985,6 @@ bool NetworkPlannerPlugin::getPlanServiceCB(arti_move_base_msgs::GetNetworkPlan:
       if (planner_path.empty())
       {
         ROS_DEBUG_STREAM("Network planner output empty!!!");
-//        return arti_nav_core::BaseNetworkPlanner::BaseNetworkPlannerErrorEnum::NO_PATH_POSSIBLE;
         return false;
       }
 //      const auto optimized_planner_path = optimizePath(planner_path, *current_pose, *current_goal_);
@@ -963,10 +995,8 @@ bool NetworkPlannerPlugin::getPlanServiceCB(arti_move_base_msgs::GetNetworkPlan:
 
       plan.path_limits.poses.reserve(planner_path.size() + 2);
 
-//      arti_nav_core_utils::convertToPose2D()
       convertPath(planner_path, start_2d.pose, target_2d.pose, plan.path_limits.poses);
       // TODO add publisher to seperated topic?
-//      plan.path_limits.poses
       nav_msgs::Path out = arti_nav_core_utils::convertToPath(plan.path_limits);
       response.path = out;
       return true;
@@ -1069,3 +1099,4 @@ arti_graph_processing::EdgePtr NetworkPlannerPlugin::GraphLoader::loadEdge(
 }
 
 PLUGINLIB_EXPORT_CLASS(arti_a_star_network_planner::NetworkPlannerPlugin, arti_nav_core::BaseNetworkPlanner)
+
